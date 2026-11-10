@@ -1,0 +1,94 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:   # 只手动触发，不自动跑
+  push:
+    branches: ["main"]
+
+jobs:
+  android:
+    name: Android (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 对齐版本号
+        id: ver
+        shell: bash
+        run: |
+          V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "version=$V"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust 工具链 + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: 缓存 Rust 构建
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: android
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 接受 Android licenses
+        shell: bash
+        run: yes | sdkmanager --licenses || true
+
+      - name: 安装 Android SDK 组件
+        run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 初始化 Tauri Android 工程
+        shell: bash
+        run: |
+          # 非交互方式初始化；如果已有 gen/android 则幂等跳过
+          yes | pnpm tauri android init || pnpm tauri android init --ci || true
+
+      - name: 构建 Android Debug APK
+        run: pnpm tauri android build --debug --apk
+
+      - name: 整理产物
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          mkdir -p artifacts
+          echo "=== 搜索 APK ==="
+          find src-tauri/gen/android -name "*.apk" || true
+          # debug apk 通常在 app/build/outputs/apk/debug/
+          for f in $(find src-tauri/gen/android -name "app-debug.apk" -o -name "*debug*.apk" | head -5); do
+            echo "发现 APK: $f"
+            cp "$f" "artifacts/HGhub_${V}_android_debug.apk"
+          done
+          ls -lh artifacts/
+          if [ ! -f "artifacts/HGhub_${V}_android_debug.apk" ]; then
+            echo "::error::未找到 APK 产物"
+            exit 1
+          fi
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HGhub-android-apk
+          path: artifacts/*.apk
+          if-no-files-found: error
